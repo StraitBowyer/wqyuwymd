@@ -38,7 +38,7 @@ PLAIN='\033[0m'
 # ----------------------------------------------------------------------------
 LANG_CHOICE="ru"                       # ru | en, переопределяется в choose_language
 
-PANEL_PORT="${XUI_PANEL_PORT:-2053}"   # порт веб-панели
+PANEL_PORT="${XUI_PANEL_PORT:-$(( (RANDOM % 40000) + 20000 ))}"   # порт веб-панели
 WEB_BASE_PATH=""                       # случайный путь панели, задаётся ниже
 PANEL_USER=""                          # логин панели
 PANEL_PASS=""                          # пароль панели
@@ -69,6 +69,12 @@ SERVER_IPV6=""
 DOMAIN=""                              # <ip>.sslip.io
 REALITY_DEST=""                        # host:443
 REALITY_SNI=""                         # host
+SUB_PATH=""
+SUB_JSON_PATH=""
+COUNTRY_NAME=""
+COUNTRY_CODE=""
+COUNTRY_FLAG=""
+REMARK_PREFIX=""
 
 # служебные значения инбаундов / inbound runtime values
 REALITY_PRIVATE_KEY=""
@@ -142,6 +148,9 @@ t() {
         disk_info)
             ru="Диск (/): %s свободно из %s"
             en="Disk (/): %s free of %s" ;;
+        geo_info)
+            ru="Локация сервера: %s"
+            en="Server location: %s" ;;
         ipv4_info)
             ru="Публичный IPv4: %s"
             en="Public IPv4: %s" ;;
@@ -304,6 +313,8 @@ detect_system() {
     info disk_info "${disk_avail:-?}" "${disk_total:-?}"
 
     detect_ip
+    detect_geo
+    info geo_info "$REMARK_PREFIX"
 }
 
 detect_ip() {
@@ -325,6 +336,32 @@ detect_ip() {
     if [[ "$v6" == *:* ]]; then
         SERVER_IPV6="$v6"
         info ipv6_info "$SERVER_IPV6"
+    fi
+}
+
+flag_from_cc() {
+    local cc="${1^^}" out="" c code
+    [[ "$cc" =~ ^[A-Z]{2}$ ]] || return 1
+    for (( i=0; i<2; i++ )); do
+        c="${cc:$i:1}"
+        printf -v code '%d' "'$c"
+        out+="$(printf '\\U%08x' "$(( code - 65 + 0x1F1E6 ))")"
+    done
+    printf '%b' "$out"
+}
+
+detect_geo() {
+    local resp
+    resp="$(curl -fsS --max-time 8 "http://ip-api.com/json/${SERVER_IPV4}?fields=country,countryCode&lang=ru" 2>/dev/null || true)"
+    COUNTRY_NAME="$(echo "$resp" | jq -r '.country // empty' 2>/dev/null)"
+    COUNTRY_CODE="$(echo "$resp" | jq -r '.countryCode // empty' 2>/dev/null)"
+    if [[ -n "$COUNTRY_CODE" ]]; then
+        COUNTRY_FLAG="$(flag_from_cc "$COUNTRY_CODE" 2>/dev/null || true)"
+    fi
+    if [[ -n "$COUNTRY_NAME" ]]; then
+        REMARK_PREFIX="$(printf '%s %s' "$COUNTRY_FLAG" "$COUNTRY_NAME" | sed 's/^ *//')"
+    else
+        REMARK_PREFIX="VLESS"
     fi
 }
 
@@ -473,9 +510,11 @@ configure_panel() {
         -webCertKey "$CERT_DIR/privkey.pem" >/dev/null 2>&1
 
     # Переносим порт подписок с 2096 (дефолт), иначе он занимает порт для WS.
+    SUB_PATH="/$(rand_hex 8)/"
+    SUB_JSON_PATH="/$(rand_hex 8)/"
     if [[ -f "$XUI_DB_PATH" ]]; then
         sqlite3 "$XUI_DB_PATH" \
-            "DELETE FROM settings WHERE key='subPort'; INSERT INTO settings (key,value) VALUES ('subPort','${SUB_PORT}');" \
+            "DELETE FROM settings WHERE key IN ('subPort','subPath','subJsonPath'); INSERT INTO settings (key,value) VALUES ('subPort','${SUB_PORT}'),('subPath','${SUB_PATH}'),('subJsonPath','${SUB_JSON_PATH}');" \
             >/dev/null 2>&1 || true
     fi
 
@@ -688,8 +727,9 @@ create_inbounds() {
 
     # 1) VLESS TCP Reality — fingerprint firefox, flow xtls-rprx-vision, порт 8443
     local reality_payload
+    local remark_reality="${REMARK_PREFIX} Reality"
     reality_payload="$(jq -nc \
-        --arg remark "VLESS-Reality-TCP" \
+        --arg remark "$remark_reality" \
         --argjson port "$REALITY_PORT" \
         --arg id "$u_reality" \
         --arg dest "$REALITY_DEST" \
@@ -721,11 +761,14 @@ create_inbounds() {
 
     # 2) VLESS gRPC за Nginx (xray слушает 127.0.0.1, TLS снимает Nginx)
     local grpc_payload
+    local remark_grpc="${REMARK_PREFIX} gRPC"
     grpc_payload="$(jq -nc \
-        --arg remark "VLESS-gRPC-Nginx" \
+        --arg remark "$remark_grpc" \
         --argjson port "$GRPC_INTERNAL" \
         --arg id "$u_grpc" \
         --arg svc "$GRPC_SERVICE_NAME" \
+        --arg pubhost "$DOMAIN" \
+        --argjson pubport "$GRPC_PORT" \
         '{
           enable: true, remark: $remark, listen: "127.0.0.1", port: $port,
           protocol: "vless", expiryTime: 0, total: 0,
@@ -733,7 +776,8 @@ create_inbounds() {
           streamSettings: {
             network: "grpc",
             grpcSettings: { serviceName: $svc, multiMode: false },
-            security: "none"
+            security: "none",
+            externalProxy: [ { forceTls: "tls", dest: $pubhost, port: $pubport, remark: "", sni: $pubhost, fingerprint: "firefox" } ]
           },
           sniffing: { enabled: true, destOverride: ["http","tls","quic"] }
         }')"
@@ -741,12 +785,15 @@ create_inbounds() {
 
     # 3) VLESS XHTTP за Nginx
     local xhttp_payload
+    local remark_xhttp="${REMARK_PREFIX} XHTTP"
     xhttp_payload="$(jq -nc \
-        --arg remark "VLESS-XHTTP-Nginx" \
+        --arg remark "$remark_xhttp" \
         --argjson port "$XHTTP_INTERNAL" \
         --arg id "$u_xhttp" \
         --arg path "$XHTTP_PATH" \
         --arg host "$DOMAIN" \
+        --arg pubhost "$DOMAIN" \
+        --argjson pubport "$XHTTP_PORT" \
         '{
           enable: true, remark: $remark, listen: "127.0.0.1", port: $port,
           protocol: "vless", expiryTime: 0, total: 0,
@@ -754,7 +801,8 @@ create_inbounds() {
           streamSettings: {
             network: "xhttp",
             xhttpSettings: { path: $path, host: $host, mode: "auto" },
-            security: "none"
+            security: "none",
+            externalProxy: [ { forceTls: "tls", dest: $pubhost, port: $pubport, remark: "", sni: $pubhost, fingerprint: "firefox" } ]
           },
           sniffing: { enabled: true, destOverride: ["http","tls","quic"] }
         }')"
@@ -762,12 +810,15 @@ create_inbounds() {
 
     # 4) VLESS WebSocket за Nginx
     local ws_payload
+    local remark_ws="${REMARK_PREFIX} WebSocket"
     ws_payload="$(jq -nc \
-        --arg remark "VLESS-WS-Nginx" \
+        --arg remark "$remark_ws" \
         --argjson port "$WS_INTERNAL" \
         --arg id "$u_ws" \
         --arg path "$WS_PATH" \
         --arg host "$DOMAIN" \
+        --arg pubhost "$DOMAIN" \
+        --argjson pubport "$WS_PORT" \
         '{
           enable: true, remark: $remark, listen: "127.0.0.1", port: $port,
           protocol: "vless", expiryTime: 0, total: 0,
@@ -775,7 +826,8 @@ create_inbounds() {
           streamSettings: {
             network: "ws",
             wsSettings: { path: $path, host: $host },
-            security: "none"
+            security: "none",
+            externalProxy: [ { forceTls: "tls", dest: $pubhost, port: $pubport, remark: "", sni: $pubhost, fingerprint: "firefox" } ]
           },
           sniffing: { enabled: true, destOverride: ["http","tls","quic"] }
         }')"
@@ -791,14 +843,19 @@ create_inbounds() {
 write_summary() {
     local u_reality="$1" u_grpc="$2" u_xhttp="$3" u_ws="$4"
 
+    local frag_reality="${REMARK_PREFIX} Reality"
+    local frag_grpc="${REMARK_PREFIX} gRPC"
+    local frag_xhttp="${REMARK_PREFIX} XHTTP"
+    local frag_ws="${REMARK_PREFIX} WebSocket"
+
     local reality_link
-    reality_link="vless://${u_reality}@${DOMAIN}:${REALITY_PORT}?type=tcp&security=reality&pbk=${REALITY_PUBLIC_KEY}&fp=firefox&sni=${REALITY_SNI}&sid=${REALITY_SHORT_ID}&spx=%2F&flow=xtls-rprx-vision#VLESS-Reality-TCP"
+    reality_link="vless://${u_reality}@${DOMAIN}:${REALITY_PORT}?type=tcp&security=reality&pbk=${REALITY_PUBLIC_KEY}&fp=firefox&sni=${REALITY_SNI}&sid=${REALITY_SHORT_ID}&spx=%2F&flow=xtls-rprx-vision#${frag_reality}"
     local grpc_link
-    grpc_link="vless://${u_grpc}@${DOMAIN}:${GRPC_PORT}?type=grpc&serviceName=${GRPC_SERVICE_NAME}&security=tls&sni=${DOMAIN}&fp=firefox#VLESS-gRPC"
+    grpc_link="vless://${u_grpc}@${DOMAIN}:${GRPC_PORT}?type=grpc&serviceName=${GRPC_SERVICE_NAME}&security=tls&sni=${DOMAIN}&fp=firefox#${frag_grpc}"
     local xhttp_link
-    xhttp_link="vless://${u_xhttp}@${DOMAIN}:${XHTTP_PORT}?type=xhttp&path=${XHTTP_PATH}&host=${DOMAIN}&mode=auto&security=tls&sni=${DOMAIN}&fp=firefox#VLESS-XHTTP"
+    xhttp_link="vless://${u_xhttp}@${DOMAIN}:${XHTTP_PORT}?type=xhttp&path=${XHTTP_PATH}&host=${DOMAIN}&mode=auto&security=tls&sni=${DOMAIN}&fp=firefox#${frag_xhttp}"
     local ws_link
-    ws_link="vless://${u_ws}@${DOMAIN}:${WS_PORT}?type=ws&path=${WS_PATH}&host=${DOMAIN}&security=tls&sni=${DOMAIN}&fp=firefox#VLESS-WS"
+    ws_link="vless://${u_ws}@${DOMAIN}:${WS_PORT}?type=ws&path=${WS_PATH}&host=${DOMAIN}&security=tls&sni=${DOMAIN}&fp=firefox#${frag_ws}"
 
     {
         echo "=================== 3x-ui ==================="
@@ -809,18 +866,18 @@ write_summary() {
         echo "Server IP : ${SERVER_IPV4}"
         echo
         echo "--- Inbounds / client links ---"
-        echo "1) VLESS TCP Reality (:${REALITY_PORT})"
+        echo "1) ${frag_reality} (:${REALITY_PORT})"
         echo "   ${reality_link}"
         echo
-        echo "2) VLESS gRPC (:${GRPC_PORT}, Nginx TLS)"
+        echo "2) ${frag_grpc} (:${GRPC_PORT}, Nginx TLS)"
         echo "   serviceName=${GRPC_SERVICE_NAME}"
         echo "   ${grpc_link}"
         echo
-        echo "3) VLESS XHTTP (:${XHTTP_PORT}, Nginx TLS)"
+        echo "3) ${frag_xhttp} (:${XHTTP_PORT}, Nginx TLS)"
         echo "   path=${XHTTP_PATH}"
         echo "   ${xhttp_link}"
         echo
-        echo "4) VLESS WebSocket (:${WS_PORT}, Nginx TLS)"
+        echo "4) ${frag_ws} (:${WS_PORT}, Nginx TLS)"
         echo "   path=${WS_PATH}"
         echo "   ${ws_link}"
         echo "============================================="
@@ -831,6 +888,11 @@ write_summary() {
 }
 
 print_final() {
+    local frag_reality="${REMARK_PREFIX} Reality"
+    local frag_grpc="${REMARK_PREFIX} gRPC"
+    local frag_xhttp="${REMARK_PREFIX} XHTTP"
+    local frag_ws="${REMARK_PREFIX} WebSocket"
+
     echo
     echo -e "${BOLD}${GREEN}==================================================${PLAIN}"
     echo -e "${BOLD}${GREEN}   $(t done_title)${PLAIN}"
@@ -839,13 +901,13 @@ print_final() {
     echo -e "${BOLD}Login:${PLAIN} ${PANEL_USER}"
     echo -e "${BOLD}Pass :${PLAIN} ${PANEL_PASS}"
     echo
-    echo -e "${BOLD}1) VLESS TCP Reality (:${REALITY_PORT})${PLAIN}"
+    echo -e "${BOLD}1) ${frag_reality} (:${REALITY_PORT})${PLAIN}"
     echo -e "   ${1}"
-    echo -e "${BOLD}2) VLESS gRPC (:${GRPC_PORT}, Nginx)${PLAIN}"
+    echo -e "${BOLD}2) ${frag_grpc} (:${GRPC_PORT}, Nginx)${PLAIN}"
     echo -e "   ${2}"
-    echo -e "${BOLD}3) VLESS XHTTP (:${XHTTP_PORT}, Nginx)${PLAIN}"
+    echo -e "${BOLD}3) ${frag_xhttp} (:${XHTTP_PORT}, Nginx)${PLAIN}"
     echo -e "   ${3}"
-    echo -e "${BOLD}4) VLESS WebSocket (:${WS_PORT}, Nginx)${PLAIN}"
+    echo -e "${BOLD}4) ${frag_ws} (:${WS_PORT}, Nginx)${PLAIN}"
     echo -e "   ${4}"
     echo
     log summary_saved "$INFO_FILE"
