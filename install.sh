@@ -48,6 +48,9 @@ GRPC_PORT=2087                         # публичный TLS-порт (Nginx)
 XHTTP_PORT=2083                        # публичный TLS-порт (Nginx) для XHTTP
 WS_PORT=2096                           # публичный TLS-порт (Nginx) для WebSocket
 
+# Порт подписок панели по умолчанию = 2096 и конфликтует с WS. Переносим его.
+SUB_PORT=2095
+
 # внутренние (localhost) порты xray-инбаундов за Nginx
 GRPC_INTERNAL=11087
 XHTTP_INTERNAL=11083
@@ -55,6 +58,7 @@ WS_INTERNAL=11096
 
 # пути / paths
 XUI_BIN="/usr/local/x-ui/x-ui"
+XUI_DB_PATH="/etc/x-ui/x-ui.db"
 CERT_DIR=""                            # /root/cert/<domain>, задаётся после выбора домена
 INFO_FILE="/root/3xui-install-info.txt"
 NGINX_CONF="/etc/nginx/conf.d/3xui-proxy.conf"
@@ -177,6 +181,9 @@ t() {
         ssl_ok)
             ru="Сертификат Let's Encrypt успешно выпущен и установлен."
             en="Let's Encrypt certificate issued and installed successfully." ;;
+        ssl_reuse)
+            ru="Найден действующий сертификат — перевыпуск не требуется."
+            en="Valid certificate already present — skipping reissue." ;;
         panel_configuring)
             ru="Задаю логин/пароль, порт и путь панели, подключаю HTTPS..."
             en="Setting panel login/password, port and path, enabling HTTPS..." ;;
@@ -369,7 +376,7 @@ install_base() {
     apt-get update -y -q
     apt-get install -y -q \
         curl wget tar socat cron openssl ca-certificates \
-        jq uuid-runtime nginx ufw iproute2 dnsutils
+        jq sqlite3 uuid-runtime nginx ufw iproute2 dnsutils
 }
 
 # ============================================================================
@@ -409,11 +416,19 @@ setup_ssl() {
 
     mkdir -p "$CERT_DIR"
 
+    # Если валидный сертификат уже есть (>7 дней до истечения) — не перевыпускаем,
+    # чтобы не упереться в лимиты Let's Encrypt при повторных запусках.
+    if [[ -s "$CERT_DIR/fullchain.pem" && -s "$CERT_DIR/privkey.pem" ]] \
+        && openssl x509 -checkend 604800 -noout -in "$CERT_DIR/fullchain.pem" >/dev/null 2>&1; then
+        log ssl_reuse
+        return
+    fi
+
     # Порт 80 нужен на время HTTP-01. Освобождаем nginx, если он занял его.
     systemctl stop nginx >/dev/null 2>&1 || true
 
     log ssl_issuing "$DOMAIN"
-    if ! "$acme" --issue -d "$DOMAIN" --standalone --httpport 80 --server letsencrypt --force; then
+    if ! "$acme" --issue -d "$DOMAIN" --standalone --httpport 80 --server letsencrypt; then
         systemctl start nginx >/dev/null 2>&1 || true
         die ssl_failed
     fi
@@ -443,6 +458,9 @@ configure_panel() {
     PANEL_PASS="$(rand_str 20)"
     WEB_BASE_PATH="$(rand_str 12)"
 
+    # Правки БД делаем при остановленном сервисе, чтобы не ловить блокировку SQLite.
+    systemctl stop x-ui >/dev/null 2>&1 || true
+
     "$XUI_BIN" setting \
         -port "$PANEL_PORT" \
         -username "$PANEL_USER" \
@@ -453,6 +471,13 @@ configure_panel() {
     "$XUI_BIN" cert \
         -webCert "$CERT_DIR/fullchain.pem" \
         -webCertKey "$CERT_DIR/privkey.pem" >/dev/null 2>&1
+
+    # Переносим порт подписок с 2096 (дефолт), иначе он занимает порт для WS.
+    if [[ -f "$XUI_DB_PATH" ]]; then
+        sqlite3 "$XUI_DB_PATH" \
+            "DELETE FROM settings WHERE key='subPort'; INSERT INTO settings (key,value) VALUES ('subPort','${SUB_PORT}');" \
+            >/dev/null 2>&1 || true
+    fi
 
     systemctl restart x-ui
     systemctl enable x-ui >/dev/null 2>&1 || true
@@ -615,8 +640,12 @@ api_post_json() {
 
 new_uuid() {
     local u
-    u="$(api_get "server/getNewUUID" | jq -r '.obj // empty')"
-    [[ -n "$u" ]] || u="$(cat /proc/sys/kernel/random/uuid)"
+    # getNewUUID может вернуть .obj как строку или как объект {"uuid": "..."} —
+    # обрабатываем оба случая, иначе UUID уедет в ссылку как JSON.
+    u="$(api_get "server/getNewUUID" \
+        | jq -r 'if (.obj|type)=="object" then (.obj.uuid // .obj.id // empty) else (.obj // empty) end' 2>/dev/null)"
+    [[ "$u" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] \
+        || u="$(cat /proc/sys/kernel/random/uuid)"
     echo "$u"
 }
 
