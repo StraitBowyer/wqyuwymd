@@ -486,10 +486,10 @@ configure_nginx() {
 # TLS терминируется Nginx, трафик уходит на локальные xray-инбаунды.
 
 # --- gRPC (порт ${GRPC_PORT}) ---
+# http2 задаётся в listen ради совместимости с Nginx < 1.25 (Ubuntu 22.04/24.04).
 server {
-    listen ${GRPC_PORT} ssl;
-    listen [::]:${GRPC_PORT} ssl;
-    http2 on;
+    listen ${GRPC_PORT} ssl http2;
+    listen [::]:${GRPC_PORT} ssl http2;
     server_name ${DOMAIN};
 
     ssl_certificate     ${CERT_DIR}/fullchain.pem;
@@ -508,9 +508,8 @@ server {
 
 # --- XHTTP (порт ${XHTTP_PORT}) ---
 server {
-    listen ${XHTTP_PORT} ssl;
-    listen [::]:${XHTTP_PORT} ssl;
-    http2 on;
+    listen ${XHTTP_PORT} ssl http2;
+    listen [::]:${XHTTP_PORT} ssl http2;
     server_name ${DOMAIN};
 
     ssl_certificate     ${CERT_DIR}/fullchain.pem;
@@ -532,10 +531,10 @@ server {
 }
 
 # --- WebSocket (порт ${WS_PORT}) ---
+# Без http2: WebSocket использует HTTP/1.1 Upgrade.
 server {
     listen ${WS_PORT} ssl;
     listen [::]:${WS_PORT} ssl;
-    http2 on;
     server_name ${DOMAIN};
 
     ssl_certificate     ${CERT_DIR}/fullchain.pem;
