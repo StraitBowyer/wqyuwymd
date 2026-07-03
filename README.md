@@ -4,19 +4,27 @@
 
 ## Установка
 
-Запускайте именно через процесс-подстановку, чтобы интерактивное меню выбора языка EN/RU работало нормально:
+Рекомендуемый способ (работает и под root, и через sudo; меню выбора языка EN/RU остаётся интерактивным):
 
 ```bash
-sudo bash <(curl -Ls https://raw.githubusercontent.com/StraitBowyer/wqyuwymd/main/install.sh)
+curl -Ls https://raw.githubusercontent.com/StraitBowyer/wqyuwymd/main/install.sh -o 3xui.sh && sudo bash 3xui.sh
 ```
 
-Если нужен полностью неинтерактивный запуск, используйте:
+Если вы уже под root, можно короче через процесс-подстановку:
 
 ```bash
-curl -Ls https://raw.githubusercontent.com/StraitBowyer/wqyuwymd/main/install.sh | sudo XUI_LANG=ru bash
+bash <(curl -Ls https://raw.githubusercontent.com/StraitBowyer/wqyuwymd/main/install.sh)
 ```
 
-(`XUI_LANG` может быть `ru` или `en`; переменная передаётся именно процессу `bash`, а не `curl`.)
+> Не запускайте `sudo bash <(curl ...)`: sudo не пробрасывает файловый дескриптор
+> процесс-подстановки, и bash упадёт с ошибкой `/dev/fd/63: No such file or directory`.
+> Используйте вариант со скачиванием в файл или без `sudo`, если вы уже root.
+
+Полностью неинтерактивный запуск (язык задаётся переменной `XUI_LANG`, `ru` или `en`):
+
+```bash
+curl -Ls https://raw.githubusercontent.com/StraitBowyer/wqyuwymd/main/install.sh -o 3xui.sh && sudo XUI_LANG=ru bash 3xui.sh
+```
 
 ## Требования
 
