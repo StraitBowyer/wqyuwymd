@@ -9,13 +9,13 @@
 Рекомендуемый способ (работает и под root, и через sudo; меню выбора языка EN/RU остаётся интерактивным):
 
 ```bash
-curl -Ls https://raw.githubusercontent.com/StraitBowyer/wqyuwymd/main/install.sh -o 3xui.sh && sudo bash 3xui.sh
+curl -Ls https://raw.githubusercontent.com/StraitBowyer/3x-ui-auto-installer-script/main/install.sh -o 3xui.sh && sudo bash 3xui.sh
 ```
 
 Если вы уже под root, можно короче через процесс-подстановку:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/StraitBowyer/wqyuwymd/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/StraitBowyer/3x-ui-auto-installer-script/main/install.sh)
 ```
 
 > Не запускайте `sudo bash <(curl ...)`: sudo не пробрасывает файловый дескриптор
@@ -25,7 +25,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/StraitBowyer/wqyuwymd/main/ins
 Полностью неинтерактивный запуск (язык задаётся переменной `XUI_LANG`, `ru` или `en`):
 
 ```bash
-curl -Ls https://raw.githubusercontent.com/StraitBowyer/wqyuwymd/main/install.sh -o 3xui.sh && sudo XUI_LANG=ru bash 3xui.sh
+curl -Ls https://raw.githubusercontent.com/StraitBowyer/3x-ui-auto-installer-script/main/install.sh -o 3xui.sh && sudo XUI_LANG=ru bash 3xui.sh
 ```
 
 ## Требования
