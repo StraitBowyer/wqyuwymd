@@ -184,6 +184,9 @@ t() {
         ssl_issuing)
             ru="Выпускаю сертификат для %s (порт 80 должен быть открыт)..."
             en="Issuing certificate for %s (port 80 must be open)..." ;;
+        acme_install_failed)
+            ru="Ошибка: не удалось установить acme.sh (проверьте доступ к get.acme.sh / github.com)."
+            en="Error: failed to install acme.sh (check access to get.acme.sh / github.com)." ;;
         ssl_failed)
             ru="Ошибка: не удалось выпустить сертификат. Проверьте, что порт 80 открыт и доступен извне."
             en="Error: failed to issue the certificate. Make sure port 80 is open and reachable from the internet." ;;
@@ -353,8 +356,9 @@ flag_from_cc() {
 detect_geo() {
     local resp
     resp="$(curl -fsS --max-time 8 "http://ip-api.com/json/${SERVER_IPV4}?fields=country,countryCode&lang=ru" 2>/dev/null || true)"
-    COUNTRY_NAME="$(echo "$resp" | jq -r '.country // empty' 2>/dev/null)"
-    COUNTRY_CODE="$(echo "$resp" | jq -r '.countryCode // empty' 2>/dev/null)"
+    # Парсим без jq: он ставится только на шаге 3, а гео-детект идёт на шаге 1.
+    COUNTRY_NAME="$(printf '%s' "$resp" | sed -n 's/.*"country":"\([^"]*\)".*/\1/p' | head -n1 || true)"
+    COUNTRY_CODE="$(printf '%s' "$resp" | sed -n 's/.*"countryCode":"\([^"]*\)".*/\1/p' | head -n1 || true)"
     if [[ -n "$COUNTRY_CODE" ]]; then
         COUNTRY_FLAG="$(flag_from_cc "$COUNTRY_CODE" 2>/dev/null || true)"
     fi
@@ -441,10 +445,10 @@ setup_ssl() {
     step step_ssl
 
     if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
-        curl -s https://get.acme.sh | sh -s -- --home "$HOME/.acme.sh" >/dev/null 2>&1
+        curl -s https://get.acme.sh | sh >/dev/null 2>&1 || true
     fi
     local acme="$HOME/.acme.sh/acme.sh"
-    [[ -x "$acme" ]] || die ssl_failed
+    [[ -x "$acme" ]] || die acme_install_failed
 
     "$acme" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
     if [[ -n "${XUI_ACME_EMAIL:-}" ]]; then
